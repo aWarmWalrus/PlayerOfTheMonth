@@ -1,0 +1,72 @@
+// This is your Prisma schema file
+// Learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Player {
+  id            String         @id @default(cuid())
+  name          String
+  team          String
+  position      String
+  stats         PlayerStats[]
+  monthlyAwards MonthlyAward[]
+  weeklyAwards  WeeklyAward[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model PlayerStats {
+  id              String   @id @default(cuid())
+  playerId        String
+  player          Player   @relation(fields: [playerId], references: [id])
+  date            DateTime
+  points          Float
+  rebounds        Float
+  assists         Float
+  steals          Float
+  blocks          Float
+  fieldGoalPct    Float
+  threePointPct   Float
+  freeThrowPct    Float
+  minutesPlayed   Float
+  gamesPlayed     Int
+  plusMinus       Float
+  efficiency      Float
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([playerId, date])
+}
+
+model MonthlyAward {
+  id        String   @id @default(cuid())
+  playerId  String
+  player    Player   @relation(fields: [playerId], references: [id])
+  month     Int
+  year      Int
+  conference String  // 'Eastern' or 'Western'
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([month, year, conference])
+}
+
+model WeeklyAward {
+  id         String   @id @default(cuid())
+  playerId   String
+  player     Player   @relation(fields: [playerId], references: [id])
+  weekStart  DateTime
+  weekEnd    DateTime
+  conference String   // 'Eastern' or 'Western'
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([weekStart, conference])
+} 
