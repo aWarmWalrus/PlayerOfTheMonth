@@ -53,15 +53,54 @@ def parse_daily_games_page(soup, daily_url):
         return
 
     game_links_found = 0
-    for game_link_p in soup.select('td.gamelink p.links a'):
-        href = game_link_p.get('href', '')
+    # Updated selector: looking for <a> tags directly within td.gamelink (or td.gamelink descendants)
+    # that have "/boxscores/" in their href.
+    selector_used = 'td.gamelink a[href*="/boxscores/"]'
+    logger.info(f"Using selector: '{selector_used}' for daily games page {daily_url}")
+
+    for game_link_tag in soup.select(selector_used):
+        href = game_link_tag.get('href', '')
         # Ensure it's a box score link and not a play-by-play or other sub-page link
-        if 'boxscores' in href and href.endswith('.html') and '/pbp/' not in href and '/shot-chart/' not in href and '/plus-minus/' not in href:
+        # The main check is '/boxscores/' and ending with '.html'
+        # Additional checks for common sub-pages help avoid false positives if structure is very flat.
+        is_box_score_link = href.startswith('/boxscores/') and href.endswith('.html')
+        is_not_sub_page = '/pbp/' not in href and \
+                          '/shot-chart/' not in href and \
+                          '/plus-minus/' not in href and \
+                          '/leaders/' not in href # another potential sub-page type
+
+        if is_box_score_link and is_not_sub_page:
             game_links_found +=1
             yield f"https://www.basketball-reference.com{href}"
+        elif is_box_score_link and not is_not_sub_page:
+            logger.debug(f"Filtered out potential sub-page link: {href} on {daily_url}")
+
 
     if game_links_found == 0:
-        logger.info(f"No box score links found on {daily_url}")
+        logger.warning(f"No box score links found using selector '{selector_used}' on {daily_url}. Trying a more general selector for game summaries.")
+        # Fallback to a more general selector if the primary one fails
+        # This targets divs that often wrap game summaries, then looks for links within.
+        # Common pattern: <div class="game_summary"> ... <td class="gamelink"> ... <a> ...
+        # Or simply any link within a game summary section.
+        # This is a guess, actual structure would need inspection if above fails.
+        selector_fallback = 'div.game_summary a[href*="/boxscores/"], div.games_summaries a[href*="/boxscores/"]'
+        logger.info(f"Using fallback selector: '{selector_fallback}' for daily games page {daily_url}")
+
+        for game_link_tag in soup.select(selector_fallback):
+            href = game_link_tag.get('href', '')
+            is_box_score_link = href.startswith('/boxscores/') and href.endswith('.html')
+            is_not_sub_page = '/pbp/' not in href and \
+                              '/shot-chart/' not in href and \
+                              '/plus-minus/' not in href and \
+                              '/leaders/' not in href
+            if is_box_score_link and is_not_sub_page:
+                game_links_found +=1
+                yield f"https://www.basketball-reference.com{href}"
+            elif is_box_score_link and not is_not_sub_page:
+                logger.debug(f"Filtered out potential sub-page link (fallback): {href} on {daily_url}")
+
+    if game_links_found == 0:
+         logger.error(f"No box score links found on {daily_url} after trying primary and fallback selectors.")
 
 
 def parse_box_score_page(soup, box_score_url):
@@ -161,3 +200,149 @@ def parse_box_score_page(soup, box_score_url):
             game_data["players"].append(player_row_data)
 
     return game_data
+
+# --- Award Parsing Helpers ---
+# Configure logger for the library if not already configured at module level for these helpers
+# logger = logging.getLogger(__name__) # Assuming logger is already defined at module level
+
+_MONTH_NAME_TO_NUMERIC = {
+    'jan': 1, 'january': 1, 'jan.': 1,
+    'feb': 2, 'february': 2, 'feb.': 2,
+    'mar': 3, 'march': 3, 'mar.': 3,
+    'apr': 4, 'april': 4, 'apr.': 4,
+    'may': 5, 'may.': 5,
+    'jun': 6, 'june': 6, 'jun.': 6,
+    'jul': 7, 'july': 7, 'jul.': 7, # For completeness, though not typical for these awards
+    'aug': 8, 'august': 8, 'aug.': 8, # For completeness
+    'sep': 9, 'september': 9, 'sep.': 9, # For completeness
+    'oct': 10, 'october': 10, 'oct.': 10,
+    'nov': 11, 'november': 11, 'nov.': 11,
+    'dec': 12, 'december': 12, 'dec.': 12,
+    'oct/nov': 11, # basketball-reference specific for early season awards
+}
+
+def get_month_numeric(month_str):
+    """
+    Converts a month string (e.g., "Oct.", "October", "Jan") to its numeric representation.
+    Case-insensitive. Handles combined months like "Oct/Nov" by returning the later month's number.
+    Returns None if the month string is not recognized.
+    """
+    if not month_str:
+        return None
+    # Normalize: lower, strip, remove dots (e.g. "Oct." -> "oct")
+    return _MONTH_NAME_TO_NUMERIC.get(month_str.lower().strip().replace('.', ''), None)
+
+def get_award_year(season_str, month_numeric, award_month_text_for_log, award_name_for_log):
+    """
+    Determines the calendar year for an award given the season string and numeric month.
+    Example: season "2022-23", month 10 (Oct) -> 2022.
+             season "2022-23", month 1 (Jan)  -> 2023.
+    Assumes NBA-like season spanning two calendar years.
+    """
+    if not season_str or month_numeric is None:
+        logger.warning(f"Cannot determine award year for {award_name_for_log} due to missing season_str ('{season_str}') or month_numeric ('{month_numeric}'). Month Text: '{award_month_text_for_log}'")
+        return None
+
+    s_parts = season_str.split('-')
+    if len(s_parts) != 2 or not s_parts[0].isdigit() or not s_parts[1].isdigit():
+        logger.error(f"Invalid season string format '{season_str}' for {award_name_for_log} ({award_month_text_for_log}). Expected YYYY-YY or YYYY-YYYY (where second part is just for show).")
+        return None
+
+    try:
+        start_year_season = int(s_parts[0])
+    except ValueError as e: # Should be caught by isdigit above, but defensive.
+        logger.error(f"Could not parse start year from '{s_parts[0]}' in season '{season_str}' for {award_name_for_log} ({award_month_text_for_log}). Error: {e}.")
+        return None
+
+    if not (1 <= month_numeric <= 12):
+        logger.error(f"Invalid month_numeric '{month_numeric}' for {award_name_for_log} ({award_month_text_for_log}), season {season_str}. Cannot determine award year.")
+        return None
+
+    # Months for awards are typically Oct (10) to Apr (4), possibly May (5), Jun (6).
+    # If month is Aug-Dec (e.g., Oct, Nov, Dec for start of season awards), it's the start_year_season.
+    # If month is Jan-Jul (e.g., Jan, Feb, Mar, Apr for end of season awards), it's start_year_season + 1.
+    if month_numeric >= 8: # Aug, Sep, Oct, Nov, Dec
+        return start_year_season
+    else: # Jan, Feb, Mar, Apr, May, Jun, Jul
+        return start_year_season + 1
+
+def parse_week_date_range(week_str, effective_season_start_year, current_row_for_log):
+    """
+    Parses a week string like "Oct 24-30" or "Dec 28-Jan 3" into start and end ISO dates.
+    Uses effective_season_start_year to infer the correct calendar year for the dates.
+    effective_season_start_year is the first year of the season (e.g. 2022 for 2022-23 season).
+    """
+    from datetime import datetime # Local import
+
+    if not week_str or effective_season_start_year is None:
+        logger.warning(f"Cannot parse week date range due to missing week_str or effective_season_start_year for {current_row_for_log}")
+        return None, None
+
+    try:
+        # Normalize by removing dots and then splitting by space.
+        # This helps handle "Oct. 24-30" and "Dec 25-Jan 3" consistently.
+        normalized_week_str = week_str.replace('.', '')
+        parts = normalized_week_str.split()
+
+        # Handle "Month Day1 - Day2" case by checking parts length
+        # If parts = ["Month", "Day1", "-", "Day2"] -> join Day1, -, Day2
+        if len(parts) == 4 and parts[2] == '-':
+            parts = [parts[0], f"{parts[1]}-{parts[3]}"]
+
+        if not (2 <= len(parts) <= 3): # Expect ["Month", "DayRange"] or ["Month", "DayRangeStart-MonthEnd", "DayEnd"]
+            logger.warning(f"Unexpected number of parts ({len(parts)}) in week string '{week_str}' after split for {current_row_for_log}. Parts: {parts}")
+            return None, None
+
+        month_name_str = parts[0]
+        start_month_numeric = get_month_numeric(month_name_str)
+
+        if not start_month_numeric:
+            logger.warning(f"Unknown start month in POW date string: '{week_str}' (parsed month: '{month_name_str}') for {current_row_for_log}.")
+            return None, None
+
+        year_for_start_date = effective_season_start_year if start_month_numeric >= 8 else effective_season_start_year + 1
+
+        day_range_str = parts[1]
+
+        if '-' in day_range_str: # Format "D1-D2" or "D1-M2"
+            start_day_str, end_day_or_month_str = day_range_str.split('-', 1)
+            start_day = int(start_day_str)
+
+            end_month_numeric_check = get_month_numeric(end_day_or_month_str)
+            if end_month_numeric_check: # Month-crossing: "D1-M2", e.g., "25-Jan"
+                end_month_numeric = end_month_numeric_check
+                if len(parts) < 3: # Expecting Day2 as parts[2]
+                    logger.warning(f"Incomplete date range for month-crossing week string '{week_str}' (expected Day2 as third part). Parts: {parts}. For {current_row_for_log}")
+                    return None, None
+                end_day = int(parts[2])
+
+                year_for_end_date = year_for_start_date
+                if end_month_numeric < start_month_numeric: # Year crossed
+                    year_for_end_date = year_for_start_date + 1
+            else: # Same month: "D1-D2", e.g., "24-30"
+                end_month_numeric = start_month_numeric
+                year_for_end_date = year_for_start_date
+                end_day = int(end_day_or_month_str)
+
+        elif day_range_str.isdigit(): # Single day: "Month Day", e.g., "Oct 24"
+            start_day = int(day_range_str)
+            end_day = start_day
+            end_month_numeric = start_month_numeric
+            year_for_end_date = year_for_start_date
+        else:
+            logger.warning(f"Unparseable day range format: '{day_range_str}' in week string '{week_str}' for {current_row_for_log}")
+            return None, None
+
+        start_date_obj = datetime(year_for_start_date, start_month_numeric, start_day)
+        end_date_obj = datetime(year_for_end_date, end_month_numeric, end_day)
+
+        return start_date_obj.strftime("%Y-%m-%d"), end_date_obj.strftime("%Y-%m-%d")
+
+    except ValueError as ve: # Catches int() conversion errors, datetime errors for invalid dates
+        logger.error(f"ValueError parsing week string '{week_str}': {ve}. For {current_row_for_log}")
+        return None, None
+    except Exception as e: # Catch any other unexpected errors
+        logger.error(f"Unexpected error parsing week string '{week_str}': {e}. For {current_row_for_log}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None
