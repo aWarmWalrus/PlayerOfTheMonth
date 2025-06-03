@@ -20,15 +20,24 @@ Dependencies:
   (requirements.txt should contain 'requests' and 'beautifulsoup4')
 
 How to Run:
-  The script is executed from the command line, providing a start and end date.
+  The script is executed from the command line, providing a start and end date,
+  and an optional rate limit.
 
   Command-line usage:
-    python scripts/scrape_bball_reference.py --start_date YYYY-MM-DD --end_date YYYY-MM-DD
+    python scripts/scrape_bball_reference.py --start_date YYYY-MM-DD --end_date YYYY-MM-DD [--qps QPS_VALUE]
+
+  Arguments:
+    --start_date YYYY-MM-DD : The first date to scrape (inclusive).
+    --end_date YYYY-MM-DD   : The last date to scrape (inclusive).
+    --qps QPS_VALUE         : (Optional) Queries Per Second to limit the request rate.
+                              For example, `--qps 0.5` means 1 request every 2 seconds.
+                              If not provided, no rate limiting is applied.
 
   Example:
-    python scripts/scrape_bball_reference.py --start_date 2023-10-24 --end_date 2023-10-26
+    python scripts/scrape_bball_reference.py --start_date 2023-10-24 --end_date 2023-10-26 --qps 1
+    python scripts/scrape_bball_reference.py --start_date 2023-11-01 --end_date 2023-11-01
 
-  The start and end dates are inclusive. The script will process all days within this range.
+  The start and end dates are inclusive.
 
 Database Schema:
   The script creates a SQLite database file at `data/bball_data.db`.
@@ -90,6 +99,7 @@ import os
 import bball_ref_scraper_lib # Import the new library
 import logging
 import sys
+import time # Import time module
 
 # Configure logging
 def setup_logging():
@@ -172,6 +182,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Scrape basketball-reference.com for box score links within a date range.")
     parser.add_argument("--start_date", required=True, help="Start date in YYYY-MM-DD format")
     parser.add_argument("--end_date", required=True, help="End date in YYYY-MM-DD format")
+    parser.add_argument('--qps', type=float, default=None, help='Queries per second (e.g., 0.5 for 1 request every 2 seconds). If not provided, no rate limiting is applied.')
     return parser.parse_args()
 
 def daterange(start_date, end_date):
@@ -182,6 +193,17 @@ def main():
     setup_logging()
     logging.info("Script started.")
     args = parse_arguments()
+
+    delay_seconds = 0
+    if args.qps is not None:
+        if args.qps > 0:
+            delay_seconds = 1.0 / args.qps
+            logging.info(f"Rate limiting enabled: {args.qps} QPS. Delay between requests: {delay_seconds:.2f} seconds.")
+        else:
+            logging.warning("Invalid QPS value. QPS must be greater than 0. Proceeding without rate limiting.")
+            # args.qps = None # Or keep it as is, knowing delay_seconds is 0
+    else:
+        logging.info("No rate limiting applied.")
 
     games_processed_count = 0
     players_inserted_count = 0
@@ -212,6 +234,9 @@ def main():
         daily_page_url = f"https://www.basketball-reference.com/boxscores/?month={month}&day={day}&year={year}"
         logging.info(f"Processing date: {single_date_str}, URL: {daily_page_url}")
 
+        if delay_seconds > 0:
+            logging.debug(f"Applying rate limit delay: {delay_seconds:.2f} seconds before fetching daily page: {daily_page_url}")
+            time.sleep(delay_seconds)
         daily_soup = bball_ref_scraper_lib.get_soup(daily_page_url)
 
         if not daily_soup:
@@ -227,6 +252,9 @@ def main():
         for box_score_url in box_score_urls_found:
             logging.info(f"  Fetching box score: {box_score_url}")
 
+            if delay_seconds > 0:
+                logging.debug(f"Applying rate limit delay: {delay_seconds:.2f} seconds before fetching box score: {box_score_url}")
+                time.sleep(delay_seconds)
             box_score_soup = bball_ref_scraper_lib.get_soup(box_score_url)
             if not box_score_soup:
                 # get_soup already logs the error
