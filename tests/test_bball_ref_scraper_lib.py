@@ -10,6 +10,12 @@ import logging
 # or that the 'scripts' directory is in PYTHONPATH.
 try:
     from scripts import bball_ref_scraper_lib
+    # Import the specific functions to be tested
+    from scripts.bball_ref_scraper_lib import (
+        get_month_numeric,
+        get_award_year,
+        parse_week_date_range
+    )
 except ImportError:
     # Fallback for cases where scripts is not directly importable
     # This might happen if tests are run from within the 'tests' directory itself
@@ -19,9 +25,15 @@ except ImportError:
     import sys
     sys.path.append(str(Path(__file__).parent.parent)) # Add repo root to path
     from scripts import bball_ref_scraper_lib
+    # And again for the specific functions
+    from scripts.bball_ref_scraper_lib import (
+        get_month_numeric,
+        get_award_year,
+        parse_week_date_range
+    )
 
 # Suppress logging during tests unless specifically testing logging
-logging.disable(logging.CRITICAL)
+# logging.disable(logging.CRITICAL) # Keep logging disabled for most tests. Enable per test if needed.
 
 
 class BaseScraperTest(unittest.TestCase):
@@ -187,6 +199,81 @@ class TestParseBoxScorePage(BaseScraperTest):
     def test_parse_box_score_page_no_soup(self):
         game_data = bball_ref_scraper_lib.parse_box_score_page(None, "dummy_none_soup_url")
         self.assertIsNone(game_data)
+
+class TestAwardParsingHelpers(unittest.TestCase):
+    def test_get_month_numeric(self):
+        self.assertEqual(get_month_numeric("Jan"), 1)
+        self.assertEqual(get_month_numeric("Jan."), 1)
+        self.assertEqual(get_month_numeric("january"), 1)
+        self.assertEqual(get_month_numeric("JANUARY"), 1)
+        self.assertEqual(get_month_numeric("Oct/Nov"), 11)
+        self.assertEqual(get_month_numeric("Dec"), 12)
+        self.assertEqual(get_month_numeric("May"), 5)
+        self.assertIsNone(get_month_numeric("InvalidMonth"))
+        self.assertIsNone(get_month_numeric(""))
+        self.assertIsNone(get_month_numeric(None))
+        self.assertEqual(get_month_numeric(" May. "), 5) # Test with spaces and dot
+
+    def test_get_award_year(self):
+        # Season 2022-23
+        self.assertEqual(get_award_year("2022-23", 10, "Oct", "TestAward"), 2022) # Oct
+        self.assertEqual(get_award_year("2022-23", 12, "Dec", "TestAward"), 2022) # Dec
+        self.assertEqual(get_award_year("2022-23", 1, "Jan", "TestAward"), 2023)  # Jan
+        self.assertEqual(get_award_year("2022-23", 4, "Apr", "TestAward"), 2023)  # Apr
+
+        # Season 2023-24 (assuming similar logic applies for months like August if they were to occur)
+        self.assertEqual(get_award_year("2023-24", 8, "Aug", "TestAward"), 2023) # Aug
+        self.assertEqual(get_award_year("2023-24", 7, "Jul", "TestAward"), 2024) # Jul
+
+        # Edge cases and invalid inputs
+        self.assertIsNone(get_award_year("2022-23", 13, "InvalidMonthNum", "TestAward"))
+        self.assertIsNone(get_award_year("2022-23", 0, "InvalidMonthNum", "TestAward"))
+        self.assertIsNone(get_award_year("invalid-season", 10, "Oct", "TestAward"))
+        self.assertIsNone(get_award_year("2022", 10, "Oct", "TestAward")) # Invalid season format
+        self.assertIsNone(get_award_year(None, 10, "Oct", "TestAward"))
+        self.assertIsNone(get_award_year("2022-23", None, "Oct", "TestAward"))
+
+    def test_parse_week_date_range(self):
+        # Test case from original script logic
+        # For a season "2023-24" (so effective_season_start_year = 2023)
+        # Week: "Oct. 23-29" -> 2023-10-23, 2023-10-29
+        # Week: "Dec 25-31" -> 2023-12-25, 2023-12-31
+        # Week: "Jan 1-7"   -> 2024-01-01, 2024-01-07
+        # Week: "Dec 25-Jan 2" -> 2023-12-25, 2024-01-02 (if effective_season_start_year=2023)
+
+        self.assertEqual(parse_week_date_range("Oct 24-30", 2023, "Test1"), ("2023-10-24", "2023-10-30"))
+        self.assertEqual(parse_week_date_range("Oct. 24-30", 2023, "Test1.1"), ("2023-10-24", "2023-10-30"))
+        self.assertEqual(parse_week_date_range("Dec 25-31", 2023, "Test2"), ("2023-12-25", "2023-12-31"))
+        self.assertEqual(parse_week_date_range("Jan 1-7", 2023, "Test3"), ("2024-01-01", "2024-01-07"))
+
+        # Month/Year crossing
+        self.assertEqual(parse_week_date_range("Dec 25-Jan 2", 2023, "Test4"), ("2023-12-25", "2024-01-02"))
+        self.assertEqual(parse_week_date_range("Dec. 28-Jan. 3", 2022, "Test5"), ("2022-12-28", "2023-01-03"))
+
+        # Range spanning month-end, same year
+        self.assertEqual(parse_week_date_range("Oct 30-Nov 5", 2023, "TestMonthSpanSameYear"), ("2023-10-30", "2023-11-05"))
+
+        # Full month names
+        self.assertEqual(parse_week_date_range("October 24-30", 2023, "TestFullName"), ("2023-10-24", "2023-10-30"))
+        self.assertEqual(parse_week_date_range("December 26-January 1", 2023, "TestFullNameMonthCross"), ("2023-12-26", "2024-01-01"))
+
+        # Single day (current library implementation supports this by returning start_day=end_day)
+        self.assertEqual(parse_week_date_range("Nov 7", 2023, "Test6"), ("2023-11-07", "2023-11-07"))
+        self.assertEqual(parse_week_date_range("October 24", 2023, "TestFullNameSingleDay"), ("2023-10-24", "2023-10-24"))
+
+
+        # Invalid formats
+        self.assertEqual(parse_week_date_range("Invalid Date String", 2023, "TestInvalid1"), (None, None))
+        self.assertEqual(parse_week_date_range("Oct 24 - 30", 2023, "TestSpaces"), ("2023-10-24", "2023-10-30")) # This format is now supported
+        self.assertEqual(parse_week_date_range("Oct 32-35", 2023, "TestInvalidDay"), (None, None))
+        self.assertEqual(parse_week_date_range("XYZ 1-5", 2023, "TestInvalidMonth"), (None, None))
+        self.assertEqual(parse_week_date_range(None, 2023, "TestNoneInput"), (None, None))
+        self.assertEqual(parse_week_date_range("", 2023, "TestEmptyString"), (None, None))
+        self.assertEqual(parse_week_date_range("Oct 1-5", None, "TestNoneYear"), (None, None))
+        self.assertEqual(parse_week_date_range("Oct 25-Jan", 2023, "TestIncompleteCross"), (None, None))
+        self.assertEqual(parse_week_date_range("Dec 28-", 2023, "TestDanglingHyphen"), (None, None))
+        self.assertEqual(parse_week_date_range("Dec 28 - Jan 3", 2023, "TestComplexSpaces"), (None, None)) # Not supported by current split logic
+
 
 if __name__ == '__main__':
     unittest.main()
